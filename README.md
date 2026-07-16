@@ -1,3 +1,3 @@
 # ERP EsSalud SII
 
-Sistema de Informacion Institucional - EsSalud
+Sistema de Informacion Integrado ERP - EsSalud
