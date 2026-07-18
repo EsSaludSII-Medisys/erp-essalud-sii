@@ -1,110 +1,159 @@
-# RAG SII-UPAO — Asistente de reglamentos universitarios
+# RAG SII EsSalud — Asistente Documental Inteligente
 
-Sistema **RAG (Retrieval-Augmented Generation)** que responde preguntas en
-lenguaje natural sobre reglamentos y trámites de la UPAO (matrícula, becas,
-trámites del SII), basándose en documentos reales en lugar del conocimiento
-general del modelo.
+Implementación de **RAG (Retrieval-Augmented Generation)** para el proyecto **SII – Implementación de un ERP en EsSalud – La Libertad**, Módulo de Procesos de Soporte Administrativo y Prestaciones Económicas (Trámite Documentario / SISGEDO y Mesa de Partes Digital).
 
-Todo funciona **100% local y gratis**: embeddings con `sentence-transformers`,
-base vectorial `ChromaDB` y el LLM con **Ollama** (sin API keys).
-
-## ¿Qué es RAG y por qué se eligió?
-
-RAG combina dos etapas:
-
-1. **Recuperación (Retrieval):** la pregunta se convierte en un *embedding*
-   (vector numérico) y se buscan por similitud los fragmentos de documento más
-   parecidos en la base vectorial.
-2. **Generación (Generation):** esos fragmentos se inyectan como *contexto* en
-   el prompt del LLM, que redacta la respuesta final.
-
-**Ventajas para el producto futuro:**
-- **Respuestas basadas en fuentes reales** → menos alucinaciones.
-- **Actualizable sin reentrenar:** basta con añadir/editar documentos y volver a
-  ejecutar `ingest.py`.
-- **Trazabilidad:** se muestran las fuentes consultadas.
-- **Bajo costo:** corre en local, escalable luego a más documentos o a la nube.
+El sistema permite realizar consultas en lenguaje natural sobre la documentación del proyecto (procesos BPMN, requisitos funcionales y no funcionales, casos de uso, modelo de datos, marco normativo — Ley 29733, DS 016-2024-JUS, ISO 27001 — y metodología UWE), recuperando los fragmentos más relevantes mediante búsqueda semántica con embeddings y generando respuestas fundamentadas con Claude (API de Anthropic).
 
 ## Arquitectura
 
 ```
-Documentos → Fragmentar (chunks) → Embeddings → ChromaDB (Vector DB)
-                                                        │
-Pregunta usuario → Embedding → Búsqueda por similitud ─┘
-                                                        │
-                            Chunks + Pregunta → LLM (Ollama) → Respuesta
+┌─────────────┐   1. carga    ┌──────────────┐   2. chunking   ┌───────────────┐
+│  Corpus     │ ────────────► │   Ingesta    │ ──────────────► │  Embeddings   │
+│ (.md/.docx) │               │ (ingest.py)  │                 │  (fastembed)  │
+└─────────────┘               └──────────────┘                 └───────┬───────┘
+                                                                       │ 3. indexado
+                              ┌──────────────┐   5. contexto   ┌───────▼───────┐
+   Pregunta del usuario ────► │  RAG Chain   │ ◄────────────── │   ChromaDB    │
+                              │ (Claude API) │  4. búsqueda    │ (persistente) │
+                              └──────┬───────┘     semántica   └───────────────┘
+                                     │ 6. respuesta + fuentes citadas
+                                     ▼
+                        CLI (app.py)  /  API REST (FastAPI)
 ```
 
-## Estructura
+**Componentes:**
 
-```
-rag-sii-upao/
-├── documentos/        # Reglamentos de prueba (.txt): matrícula, becas, trámites
-├── ingest.py          # Indexa los documentos en ChromaDB
-├── query.py           # Consulta el RAG y genera la respuesta con Ollama
-├── requirements.txt
-└── README.md
-```
+| Componente | Tecnología | Rol |
+|---|---|---|
+| Embeddings | `fastembed` — `paraphrase-multilingual-MiniLM-L12-v2` (ONNX) | Vectorización multilingüe (optimizada para español), sin GPU |
+| Vector store | ChromaDB (persistente, distancia coseno) | Almacenamiento e indexado de chunks |
+| Chunking | División por encabezados + párrafos, 900 caracteres con solapamiento de 150 | Preserva el contexto de cada sección del informe |
+| LLM | Claude (`claude-sonnet-4-6`) vía API de Anthropic | Generación de respuestas fundamentadas en el contexto recuperado |
+| Interfaz | CLI interactivo + API REST (FastAPI) | Consumo directo o integración con el ERP / Mesa de Partes Digital |
+
+## Alineamiento con ISO/IEC 25059 (calidad de sistemas con IA)
+
+Según lo propuesto en el informe del proyecto, el componente de IA cumple los atributos de calidad de la norma:
+
+- **Explicabilidad**: cada respuesta incluye las fuentes recuperadas (documento, sección y puntaje de similitud), lo que permite auditar por qué el asistente respondió de determinada forma.
+- **Robustez**: si la información no existe en el corpus, el asistente lo indica explícitamente en lugar de inventar; los errores de configuración (falta de API key, colección vacía) se manejan de forma controlada.
+- **Adaptabilidad**: el corpus es extensible — basta con agregar nuevos documentos (`.md`, `.txt`, `.docx`) a `data/corpus/` y re-ejecutar la ingesta para que el conocimiento del asistente se actualice.
 
 ## Instalación
 
-### 1. Entorno de Python y dependencias
 ```bash
+git clone <url-del-repo>
+cd rag-sii-essalud
+
 python -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 
-# Instalar PRIMERO torch en su versión CPU (evita ~2.5 GB de CUDA de NVIDIA)
-pip install torch --index-url https://download.pytorch.org/whl/cpu
-
-# Luego el resto de dependencias
 pip install -r requirements.txt
-```
-> **Nota importante:** por defecto `torch` arrastra ~2.5 GB de librerías CUDA de
-> NVIDIA que pueden llenar `/tmp` y provocar el error *"No space left on device"*.
-> Los embeddings de este proyecto corren en **CPU** y el LLM lo gestiona Ollama
-> por separado, así que la versión CPU de torch (~192 MB) es suficiente.
-> Si `/tmp` es pequeño, usa un temporal en tu disco:
-> `mkdir -p ~/tmp-pip && TMPDIR=~/tmp-pip pip install -r requirements.txt`
 
-### 2. Instalar Ollama y descargar un modelo
-```bash
-# Instalar Ollama (Linux)
-curl -fsSL https://ollama.com/install.sh | sh
-
-# Descargar el modelo usado por defecto en query.py
-ollama pull llama3.2
+cp .env.example .env             # colocar tu ANTHROPIC_API_KEY
 ```
-> Ollama debe estar corriendo (`ollama serve` o el servicio del sistema).
 
 ## Uso
 
+### 1. Ingesta del corpus
+
+Indexa todos los documentos de `data/corpus/` en ChromaDB:
+
 ```bash
-# 1) Indexar los documentos (crea ./chroma_db)
-python ingest.py
-
-# 2) Preguntar (ejemplo del enunciado)
-python query.py "¿Cuáles son los requisitos para reserva de matrícula?"
-
-# Modo interactivo
-python query.py
+python -m src.ingest           # ingesta incremental (upsert)
+python -m src.ingest --reset   # recrear la colección desde cero
 ```
 
-## Prompt template interno del RAG
+### 2. Chat interactivo (CLI)
 
-Definido en `query.py`, obliga al modelo a responder **solo** con el contexto
-recuperado:
-
-```
-system: Eres un asistente académico de la UPAO. Responde ÚNICAMENTE con la
-        información del CONTEXTO. Si no está en el contexto, dilo claramente.
-human:  CONTEXTO:
-        {contexto}
-
-        PREGUNTA: {pregunta}
-        RESPUESTA:
+```bash
+python app.py
 ```
 
-## Notas de configuración
-- Modelo de embeddings: `paraphrase-multilingual-MiniLM-L12-v2` (multilingüe).
-- LLM por defecto: `llama3.2` (editable en `query.py`, variable `LLM_MODEL`).
-- Chunks: 500 caracteres con 100 de solapamiento; `TOP_K = 4` fragmentos.
+```
+Tú > ¿Qué gestor de base de datos se eligió y por qué?
+
+El proyecto seleccionó PostgreSQL como gestor de base de datos, debido a...
+
+Fuentes consultadas:
+  - SII_ESSALUD_Grupo1_V2_0.md > ELECCIÓN DEL GESTOR DE BASE DE DATOS (similitud 0.58)
+```
+
+Consulta única sin modo interactivo:
+
+```bash
+python app.py -q "¿Cómo funciona la firma digital en el trámite documentario?"
+```
+
+Solo recuperación semántica (sin llamar al LLM, no requiere API key):
+
+```bash
+python app.py --solo-buscar -q "requisitos de la mesa de partes digital"
+```
+
+### 3. API REST
+
+```bash
+uvicorn src.api:app --reload --port 8000
+```
+
+| Método | Endpoint | Descripción |
+|---|---|---|
+| `GET` | `/health` | Estado del servicio |
+| `POST` | `/ask` | `{"question": "..."}` → respuesta RAG con fuentes |
+| `POST` | `/search` | `{"question": "...", "k": 5}` → solo chunks recuperados |
+
+Documentación interactiva (Swagger): `http://localhost:8000/docs`
+
+### 4. Pruebas
+
+Prueba de humo del pipeline (ingesta + recuperación, sin necesidad de API key):
+
+```bash
+python -m tests.test_retrieval
+```
+
+## Estructura del proyecto
+
+```
+rag-sii-essalud/
+├── app.py                  # CLI interactivo
+├── requirements.txt
+├── .env.example            # plantilla de variables de entorno
+├── data/
+│   ├── corpus/             # documentos fuente (.md, .txt, .docx)
+│   └── chroma_db/          # base vectorial persistente (git-ignored)
+├── src/
+│   ├── config.py           # configuración central (rutas, modelos, parámetros)
+│   ├── embeddings.py       # función de embeddings (fastembed → ChromaDB)
+│   ├── ingest.py           # pipeline de ingesta: carga → chunking → indexado
+│   ├── retriever.py        # búsqueda semántica sobre ChromaDB
+│   ├── rag_chain.py        # cadena RAG: recuperación + generación (Claude)
+│   └── api.py              # API REST (FastAPI)
+└── tests/
+    └── test_retrieval.py   # pruebas de humo (no requieren API key)
+```
+
+## Configuración avanzada
+
+Parámetros editables en `.env` (ver `.env.example`):
+
+| Variable | Por defecto | Descripción |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | — | Clave de la API de Anthropic (obligatoria para generación) |
+| `LLM_MODEL` | `claude-sonnet-4-6` | Modelo de generación |
+| `EMBEDDING_MODEL` | `paraphrase-multilingual-MiniLM-L12-v2` | Modelo de embeddings (fastembed) |
+| `CHUNK_SIZE` | `900` | Tamaño de chunk en caracteres |
+| `CHUNK_OVERLAP` | `150` | Solapamiento entre chunks |
+| `TOP_K` | `5` | Chunks recuperados por consulta |
+
+## Ampliar el corpus
+
+1. Copiar los nuevos documentos (`.md`, `.txt` o `.docx`) a `data/corpus/`.
+2. Ejecutar `python -m src.ingest`.
+3. Listo — el asistente ya responde con el nuevo conocimiento.
+
+---
+
+**Curso:** Sistemas de Información Integrados — UPAO · NRC 5633 · Trujillo, 2026
+**Grupo 1:** Lescano León · Medina Tirado · Mezones Burgos · Valverde Vásquez

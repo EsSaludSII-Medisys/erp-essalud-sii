@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
+.env
+data/chroma_db/
 .venv/
 venv/
-chroma_db/
-.idea/
+.local_cache/
